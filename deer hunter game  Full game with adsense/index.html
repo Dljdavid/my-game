@@ -1,0 +1,1322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Deer Hunter Survival — Ultimate Edition</title>
+<style>
+  html,body{height:100%;margin:0;background:#111;color:#fff;font-family:Arial,Helvetica,sans-serif}
+  #gameWrap{display:flex;height:100%;align-items:center;justify-content:center}
+  canvas{background:#3b6b2f; image-rendering:pixelated; border:4px solid #222}
+  .overlay{position:fixed;left:20px;top:20px;color:#fff;z-index:20}
+  button {padding:10px 16px;margin:6px;background:#fff;color:#000;border-radius:6px;border:0;cursor:pointer;transition:all 0.2s}
+  button:hover{background:#ddd;transform:scale(1.05)}
+  .menu {display:flex;flex-direction:column;align-items:center;gap:12px;}
+  .panel{background: rgba(0,0,0,0.8); padding:20px;border-radius:12px;border:2px solid #444}
+  #footer{position:fixed;left:0;right:0;bottom:10px;text-align:center;color:#ddd;font-size:13px}
+  .upgrade-menu{position:fixed;right:20px;top:20px;background:rgba(0,0,0,0.8);padding:15px;border-radius:8px;border:2px solid #444;min-width:200px}
+  .upgrade-item{margin:8px 0;padding:8px;background:rgba(255,255,255,0.1);border-radius:4px}
+  .score-display{position:fixed;top:20px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.8);padding:10px 20px;border-radius:8px;border:2px solid #444}
+</style>
+</head>
+<body>
+<div id="gameWrap">
+  <canvas id="game" width="1280" height="720"></canvas>
+</div>
+
+<div id="ui" class="overlay panel"></div>
+<div id="upgradeMenu" class="upgrade-menu" style="display:none;">
+  <h3 style="margin:0 0 10px 0;color:#fff">Upgrades</h3>
+  <div id="upgradeList"></div>
+</div>
+<div id="scoreDisplay" class="score-display">
+  <div id="scoreText">Score: 0</div>
+</div>
+<div id="menuPanel" class="overlay panel" style="left:calc(50% - 200px);top:80px;transform:none;">
+  <div id="menuContent" class="menu">
+    <h2 style="margin:0 0 6px 0">Deer Hunter Survival</h2>
+    <div id="menuButtons"></div>
+    <div style="font-size:13px;color:#ddd;margin-top:8px">Tip: press <b>U</b> for upgrade menu, <b>I</b> for infinite HP</div>
+  </div>
+</div>
+
+<div id="footer">Controls: WASD / Arrow keys to move — Mouse to aim — Left click to shoot — U for upgrades — Esc to menu</div>
+
+<!-- Audio elements -->
+<audio id="sfx_shoot" src="shoot.mp3" preload="auto"></audio>
+<audio id="sfx_hit" src="hit.wav" preload="auto"></audio>
+<audio id="bgm" src="bgm.wav" preload="auto" loop></audio>
+
+<!-- Image preloading -->
+<img id="backgroundImg" src="background.jpg" style="display:none" />
+<img id="hunterImg" src="hunter player.gif" style="display:none" />
+<img id="deerImg" src="deer.png" style="display:none" />
+<img id="sniperImg" src="sniper enemy.png" style="display:none" />
+<img id="bulletImg" src="bullet_4.png" style="display:none" />
+<img id="blockImg" src="block.png" style="display:none" />
+<img id="upgradeMenuImg" src="upgrade menu.jpg" style="display:none" />
+
+<script>
+// ======= Game Constants & Utilities =======
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d', { alpha: false });
+const W = canvas.width, H = canvas.height;
+
+function rand(min,max){return Math.floor(min + Math.random()*(max-min+1));}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}
+function angleTo(a,b){return Math.atan2(b.y-a.y, b.x-a.x);}
+
+// ======= Image Loading =======
+const images = {
+  background: document.getElementById('backgroundImg'),
+  hunter: document.getElementById('hunterImg'),
+  deer: document.getElementById('deerImg'),
+  sniper: document.getElementById('sniperImg'),
+  bullet: document.getElementById('bulletImg'),
+  block: document.getElementById('blockImg'),
+  upgradeMenu: document.getElementById('upgradeMenuImg')
+};
+
+// ======= Game State =======
+let state = 'menu'; // 'menu', 'playing', 'paused', 'gameover', 'controls'
+let mouse = {x:0,y:0,down:false};
+let keys = {};
+let now = 0, last = 0;
+
+// Player / globals (initialized in resetGame)
+let player, bullets = [], enemies = [], enemyBullets = [];
+let globals = {
+  currency: 0, 
+  weaponLevel: 1, 
+  armorLevel: 1, 
+  wave: 0, 
+  infiniteHP: false,
+  score: 0,
+  survivalTime: 0,
+  killCount: 0
+};
+
+// ======= COMPREHENSIVE UPGRADE SYSTEM =======
+const upgrades = {
+  // Health and Defense Upgrades (20)
+  health: {
+    maxHealth: { name: "Max Health Boost", base: 100, perLevel: 50, cost: 100, maxLevel: 10, rarity: "common" },
+    healthRegen: { name: "Health Regen", base: 0, perLevel: 1, cost: 150, maxLevel: 5, rarity: "common" },
+    extraShield: { name: "Extra Shield", base: 0, perLevel: 25, cost: 300, maxLevel: 8, rarity: "rare" },
+    thornArmor: { name: "Thorn Armor", base: 0, perLevel: 5, cost: 500, maxLevel: 5, rarity: "rare" },
+    nanoRepair: { name: "Nano-Repair Bots", base: 0, perLevel: 1, cost: 800, maxLevel: 3, rarity: "epic" },
+    invulnBurst: { name: "Invulnerability Burst", base: 0, perLevel: 1, cost: 1200, maxLevel: 3, rarity: "epic" },
+    damageReduction: { name: "Damage Reduction", base: 0, perLevel: 2, cost: 200, maxLevel: 10, rarity: "common" },
+    shieldRecharge: { name: "Shield Recharge", base: 0, perLevel: 1, cost: 400, maxLevel: 5, rarity: "rare" },
+    traumaPlate: { name: "Trauma Plate", base: 0, perLevel: 10, cost: 600, maxLevel: 5, rarity: "rare" },
+    adrenalineSurge: { name: "Adrenaline Surge", base: 0, perLevel: 1, cost: 700, maxLevel: 3, rarity: "epic" },
+    fortifiedBones: { name: "Fortified Bones", base: 0, perLevel: 5, cost: 250, maxLevel: 8, rarity: "common" },
+    energyBarrier: { name: "Energy Barrier", base: 0, perLevel: 15, cost: 900, maxLevel: 4, rarity: "epic" },
+    quickRecovery: { name: "Quick Recovery", base: 0, perLevel: 1, cost: 350, maxLevel: 5, rarity: "rare" },
+    hardenedSkin: { name: "Hardened Skin", base: 0, perLevel: 3, cost: 180, maxLevel: 6, rarity: "common" },
+    overchargeShield: { name: "Overcharge Shield", base: 0, perLevel: 1, cost: 1000, maxLevel: 2, rarity: "legendary" },
+    reflectiveCoating: { name: "Reflective Coating", base: 0, perLevel: 8, cost: 450, maxLevel: 5, rarity: "rare" },
+    autoDefibrillator: { name: "Auto-Defibrillator", base: 0, perLevel: 1, cost: 1500, maxLevel: 1, rarity: "legendary" },
+    painSuppressant: { name: "Pain Suppressant", base: 0, perLevel: 1, cost: 550, maxLevel: 4, rarity: "epic" },
+    kineticAbsorber: { name: "Kinetic Absorber", base: 0, perLevel: 1, cost: 800, maxLevel: 3, rarity: "epic" },
+    emergencyEvac: { name: "Emergency Evac", base: 0, perLevel: 1, cost: 2000, maxLevel: 1, rarity: "legendary" }
+  },
+  
+  // Offense Boosts (20)
+  offense: {
+    damageBoost: { name: "Damage Boost", base: 0, perLevel: 10, cost: 150, maxLevel: 10, rarity: "common" },
+    fireRateBoost: { name: "Fire Rate Boost", base: 0, perLevel: 10, cost: 120, maxLevel: 10, rarity: "common" },
+    critChance: { name: "Critical Hit Chance", base: 0, perLevel: 5, cost: 200, maxLevel: 8, rarity: "common" },
+    explosiveRounds: { name: "Explosive Rounds", base: 0, perLevel: 1, cost: 600, maxLevel: 3, rarity: "epic" },
+    piercingBullets: { name: "Piercing Bullets", base: 0, perLevel: 1, cost: 400, maxLevel: 5, rarity: "rare" },
+    fireInfusion: { name: "Fire Infusion", base: 0, perLevel: 1, cost: 500, maxLevel: 4, rarity: "rare" },
+    iceInfusion: { name: "Ice Infusion", base: 0, perLevel: 1, cost: 500, maxLevel: 4, rarity: "rare" },
+    electricInfusion: { name: "Electric Infusion", base: 0, perLevel: 1, cost: 500, maxLevel: 4, rarity: "rare" },
+    headshotMultiplier: { name: "Headshot Multiplier", base: 0, perLevel: 0.5, cost: 300, maxLevel: 6, rarity: "rare" },
+    reloadSpeed: { name: "Reload Speed", base: 0, perLevel: 15, cost: 150, maxLevel: 8, rarity: "common" },
+    ammoCapacity: { name: "Ammo Capacity", base: 0, perLevel: 20, cost: 100, maxLevel: 10, rarity: "common" },
+    bleedingShots: { name: "Bleeding Shots", base: 0, perLevel: 1, cost: 350, maxLevel: 5, rarity: "rare" },
+    concussiveBlast: { name: "Concussive Blast", base: 0, perLevel: 1, cost: 700, maxLevel: 3, rarity: "epic" },
+    precisionAim: { name: "Precision Aim", base: 0, perLevel: 1, cost: 250, maxLevel: 6, rarity: "common" },
+    overpressureRounds: { name: "Overpressure Rounds", base: 0, perLevel: 1, cost: 800, maxLevel: 3, rarity: "epic" },
+    toxicCoating: { name: "Toxic Coating", base: 0, perLevel: 1, cost: 450, maxLevel: 4, rarity: "rare" },
+    homingProjectiles: { name: "Homing Projectiles", base: 0, perLevel: 1, cost: 1200, maxLevel: 2, rarity: "legendary" },
+    chainLightning: { name: "Chain Lightning", base: 0, perLevel: 1, cost: 1000, maxLevel: 3, rarity: "legendary" },
+    incendiaryBurst: { name: "Incendiary Burst", base: 0, perLevel: 1, cost: 600, maxLevel: 4, rarity: "epic" },
+    shrapnelSpray: { name: "Shrapnel Spray", base: 0, perLevel: 1, cost: 400, maxLevel: 5, rarity: "rare" },
+    overclockedTrigger: { name: "Overclocked Trigger", base: 0, perLevel: 1, cost: 1500, maxLevel: 2, rarity: "legendary" }
+  },
+  
+  // Mobility and Utility (20)
+  mobility: {
+    sprintBoost: { name: "Sprint Boost", base: 0, perLevel: 20, cost: 100, maxLevel: 10, rarity: "common" },
+    doubleJump: { name: "Double Jump", base: 0, perLevel: 1, cost: 300, maxLevel: 1, rarity: "rare" },
+    grappleHook: { name: "Grapple Hook", base: 0, perLevel: 1, cost: 800, maxLevel: 3, rarity: "epic" },
+    stealthCloak: { name: "Stealth Cloak", base: 0, perLevel: 1, cost: 1000, maxLevel: 2, rarity: "legendary" },
+    teleportDash: { name: "Teleport Dash", base: 0, perLevel: 1, cost: 1200, maxLevel: 2, rarity: "legendary" },
+    resourceMagnet: { name: "Resource Magnet", base: 0, perLevel: 25, cost: 200, maxLevel: 8, rarity: "common" },
+    jetpackThrust: { name: "Jetpack Thrust", base: 0, perLevel: 1, cost: 600, maxLevel: 4, rarity: "epic" },
+    wallRun: { name: "Wall Run", base: 0, perLevel: 1, cost: 500, maxLevel: 3, rarity: "rare" },
+    slideBoost: { name: "Slide Boost", base: 0, perLevel: 1, cost: 250, maxLevel: 5, rarity: "common" },
+    hologramDecoy: { name: "Hologram Decoy", base: 0, perLevel: 1, cost: 700, maxLevel: 3, rarity: "epic" },
+    nightVision: { name: "Night Vision", base: 0, perLevel: 1, cost: 400, maxLevel: 1, rarity: "rare" },
+    radarScanner: { name: "Radar Scanner", base: 0, perLevel: 50, cost: 300, maxLevel: 6, rarity: "rare" },
+    speedLoader: { name: "Speed Loader", base: 0, perLevel: 1, cost: 150, maxLevel: 8, rarity: "common" },
+    trapDisarmer: { name: "Trap Disarmer", base: 0, perLevel: 1, cost: 350, maxLevel: 5, rarity: "rare" },
+    staminaSurge: { name: "Stamina Surge", base: 0, perLevel: 1, cost: 200, maxLevel: 6, rarity: "common" },
+    climbingGear: { name: "Climbing Gear", base: 0, perLevel: 1, cost: 450, maxLevel: 4, rarity: "rare" },
+    parachuteDrop: { name: "Parachute Drop", base: 0, perLevel: 1, cost: 600, maxLevel: 2, rarity: "epic" },
+    fastHands: { name: "Fast Hands", base: 0, perLevel: 1, cost: 180, maxLevel: 7, rarity: "common" },
+    terrainScanner: { name: "Terrain Scanner", base: 0, perLevel: 1, cost: 500, maxLevel: 3, rarity: "rare" },
+    quickVault: { name: "Quick Vault", base: 0, perLevel: 1, cost: 300, maxLevel: 4, rarity: "common" }
+  },
+  
+  // Turrets and Automation (20)
+  turrets: {
+    basicTurret: { name: "Basic Turret", base: 0, perLevel: 1, cost: 400, maxLevel: 5, rarity: "rare" },
+    tripwireMines: { name: "Tripwire Mines", base: 0, perLevel: 1, cost: 300, maxLevel: 6, rarity: "common" },
+    flamethrowerTurret: { name: "Flamethrower Turret", base: 0, perLevel: 1, cost: 800, maxLevel: 3, rarity: "epic" },
+    sniperTower: { name: "Sniper Tower", base: 0, perLevel: 1, cost: 1000, maxLevel: 3, rarity: "epic" },
+    droneSwarm: { name: "Drone Swarm", base: 0, perLevel: 1, cost: 1500, maxLevel: 2, rarity: "legendary" },
+    selfRepairingFort: { name: "Self-Repairing Fort", base: 0, perLevel: 1, cost: 1200, maxLevel: 2, rarity: "legendary" },
+    rocketTurret: { name: "Rocket Turret", base: 0, perLevel: 1, cost: 900, maxLevel: 3, rarity: "epic" },
+    laserGrid: { name: "Laser Grid", base: 0, perLevel: 1, cost: 600, maxLevel: 4, rarity: "rare" },
+    empTrap: { name: "EMP Trap", base: 0, perLevel: 1, cost: 700, maxLevel: 3, rarity: "epic" },
+    barricadeBuilder: { name: "Barricade Builder", base: 0, perLevel: 1, cost: 500, maxLevel: 5, rarity: "rare" },
+    autoCannon: { name: "Auto-Cannon", base: 0, perLevel: 1, cost: 1100, maxLevel: 2, rarity: "legendary" },
+    proximityMines: { name: "Proximity Mines", base: 0, perLevel: 1, cost: 350, maxLevel: 6, rarity: "common" },
+    healingTurret: { name: "Healing Turret", base: 0, perLevel: 1, cost: 800, maxLevel: 3, rarity: "epic" },
+    smokeScreen: { name: "Smoke Screen", base: 0, perLevel: 1, cost: 400, maxLevel: 5, rarity: "rare" },
+    teslaCoil: { name: "Tesla Coil", base: 0, perLevel: 1, cost: 1000, maxLevel: 3, rarity: "epic" },
+    mortarLauncher: { name: "Mortar Launcher", base: 0, perLevel: 1, cost: 1300, maxLevel: 2, rarity: "legendary" },
+    repairDrone: { name: "Repair Drone", base: 0, perLevel: 1, cost: 900, maxLevel: 3, rarity: "epic" },
+    barbedWire: { name: "Barbed Wire", base: 0, perLevel: 1, cost: 250, maxLevel: 8, rarity: "common" },
+    motionSensor: { name: "Motion Sensor", base: 0, perLevel: 1, cost: 300, maxLevel: 6, rarity: "common" },
+    gatlingTurret: { name: "Gatling Turret", base: 0, perLevel: 1, cost: 1400, maxLevel: 2, rarity: "legendary" }
+  },
+  
+  // Specialty and Exotic (20)
+  specialty: {
+    animalCompanion: { name: "Animal Companion", base: 0, perLevel: 1, cost: 1000, maxLevel: 3, rarity: "legendary" },
+    waveSkip: { name: "Wave Skip", base: 0, perLevel: 1, cost: 2000, maxLevel: 1, rarity: "legendary" },
+    mutationSerum: { name: "Mutation Serum", base: 0, perLevel: 1, cost: 800, maxLevel: 3, rarity: "epic" },
+    timeSlow: { name: "Time Slow", base: 0, perLevel: 1, cost: 1500, maxLevel: 2, rarity: "legendary" },
+    orbitalStrike: { name: "Orbital Strike", base: 0, perLevel: 1, cost: 2500, maxLevel: 1, rarity: "legendary" },
+    realityWarp: { name: "Reality Warp", base: 0, perLevel: 1, cost: 3000, maxLevel: 1, rarity: "legendary" },
+    gravityWell: { name: "Gravity Well", base: 0, perLevel: 1, cost: 1200, maxLevel: 2, rarity: "legendary" },
+    cloneAlly: { name: "Clone Ally", base: 0, perLevel: 1, cost: 1800, maxLevel: 2, rarity: "legendary" },
+    resourceMultiplier: { name: "Resource Multiplier", base: 0, perLevel: 1, cost: 600, maxLevel: 5, rarity: "epic" },
+    berserkerRage: { name: "Berserker Rage", base: 0, perLevel: 1, cost: 1000, maxLevel: 3, rarity: "epic" },
+    empPulse: { name: "EMP Pulse", base: 0, perLevel: 1, cost: 700, maxLevel: 4, rarity: "epic" },
+    holographicMap: { name: "Holographic Map", base: 0, perLevel: 1, cost: 500, maxLevel: 3, rarity: "rare" },
+    weatherControl: { name: "Weather Control", base: 0, perLevel: 1, cost: 2000, maxLevel: 1, rarity: "legendary" },
+    enemyScanner: { name: "Enemy Scanner", base: 0, perLevel: 1, cost: 400, maxLevel: 5, rarity: "rare" },
+    lootAmplifier: { name: "Loot Amplifier", base: 0, perLevel: 1, cost: 800, maxLevel: 4, rarity: "epic" },
+    phantomStrike: { name: "Phantom Strike", base: 0, perLevel: 1, cost: 1200, maxLevel: 2, rarity: "legendary" },
+    rewindTime: { name: "Rewind Time", base: 0, perLevel: 1, cost: 2500, maxLevel: 1, rarity: "legendary" },
+    summonDecoy: { name: "Summon Decoy", base: 0, perLevel: 1, cost: 600, maxLevel: 4, rarity: "epic" },
+    chaosGrenade: { name: "Chaos Grenade", base: 0, perLevel: 1, cost: 900, maxLevel: 3, rarity: "epic" },
+    apexPredator: { name: "Apex Predator", base: 0, perLevel: 1, cost: 1500, maxLevel: 2, rarity: "legendary" }
+  },
+  
+  // Weapon Upgrades (5)
+  weapons: {
+    weaponDamage: { name: "Weapon Damage", base: 0, perLevel: 5, cost: 200, maxLevel: 10, rarity: "common" },
+    weaponFireRate: { name: "Weapon Fire Rate", base: 0, perLevel: 1, cost: 300, maxLevel: 8, rarity: "common" },
+    weaponRange: { name: "Weapon Range", base: 0, perLevel: 10, cost: 250, maxLevel: 6, rarity: "common" },
+    weaponAmmo: { name: "Weapon Ammo", base: 0, perLevel: 2, cost: 150, maxLevel: 10, rarity: "common" },
+    weaponReload: { name: "Weapon Reload Speed", base: 0, perLevel: 5, cost: 180, maxLevel: 8, rarity: "common" }
+  }
+};
+
+// Player upgrade levels (initialized in resetGame)
+let playerUpgrades = {};
+
+// ======= WEAPON SYSTEM =======
+const weapons = {
+  // Pistols and Sidearms (10)
+  pistols: {
+    revolver: { name: "Revolver", damage: 45, fireRate: 8, range: 200, ammo: 6, reloadTime: 60, cost: 0, unlocked: true, rarity: "common" },
+    autoPistol: { name: "Auto-Pistol", damage: 15, fireRate: 3, range: 150, ammo: 20, reloadTime: 40, cost: 200, unlocked: false, rarity: "common" },
+    taserGun: { name: "Taser Gun", damage: 5, fireRate: 5, range: 100, ammo: 10, reloadTime: 30, cost: 300, unlocked: false, rarity: "rare" },
+    magnum: { name: "Magnum", damage: 60, fireRate: 12, range: 250, ammo: 5, reloadTime: 80, cost: 500, unlocked: false, rarity: "rare" },
+    burstPistol: { name: "Burst Pistol", damage: 20, fireRate: 2, range: 180, ammo: 15, reloadTime: 50, cost: 400, unlocked: false, rarity: "common" },
+    plasmaPistol: { name: "Plasma Pistol", damage: 35, fireRate: 6, range: 200, ammo: 12, reloadTime: 45, cost: 800, unlocked: false, rarity: "epic" },
+    dualPistols: { name: "Dual Pistols", damage: 25, fireRate: 4, range: 160, ammo: 30, reloadTime: 60, cost: 600, unlocked: false, rarity: "rare" },
+    silencedPistol: { name: "Silenced Pistol", damage: 30, fireRate: 7, range: 170, ammo: 8, reloadTime: 35, cost: 350, unlocked: false, rarity: "common" },
+    explosivePistol: { name: "Explosive Pistol", damage: 50, fireRate: 10, range: 120, ammo: 4, reloadTime: 70, cost: 700, unlocked: false, rarity: "epic" },
+    laserPistol: { name: "Laser Pistol", damage: 40, fireRate: 5, range: 300, ammo: 25, reloadTime: 20, cost: 1000, unlocked: false, rarity: "legendary" }
+  },
+  
+  // Rifles and Assault Weapons (15)
+  rifles: {
+    huntingRifle: { name: "Hunting Rifle", damage: 80, fireRate: 15, range: 400, ammo: 5, reloadTime: 90, cost: 300, unlocked: false, rarity: "common" },
+    ak47: { name: "AK-47", damage: 35, fireRate: 2, range: 300, ammo: 30, reloadTime: 60, cost: 500, unlocked: false, rarity: "common" },
+    crossbow: { name: "Crossbow", damage: 70, fireRate: 20, range: 350, ammo: 1, reloadTime: 100, cost: 400, unlocked: false, rarity: "rare" },
+    sniperRifle: { name: "Sniper Rifle", damage: 120, fireRate: 25, range: 500, ammo: 4, reloadTime: 120, cost: 800, unlocked: false, rarity: "epic" },
+    assaultRifle: { name: "Assault Rifle", damage: 30, fireRate: 3, range: 250, ammo: 25, reloadTime: 50, cost: 600, unlocked: false, rarity: "common" },
+    battleRifle: { name: "Battle Rifle", damage: 55, fireRate: 8, range: 350, ammo: 10, reloadTime: 70, cost: 700, unlocked: false, rarity: "rare" },
+    marksmanRifle: { name: "Marksman Rifle", damage: 65, fireRate: 12, range: 400, ammo: 8, reloadTime: 80, cost: 650, unlocked: false, rarity: "rare" },
+    plasmaRifle: { name: "Plasma Rifle", damage: 50, fireRate: 6, range: 300, ammo: 20, reloadTime: 40, cost: 1000, unlocked: false, rarity: "epic" },
+    railgun: { name: "Railgun", damage: 150, fireRate: 30, range: 600, ammo: 3, reloadTime: 150, cost: 1500, unlocked: false, rarity: "legendary" },
+    burstRifle: { name: "Burst Rifle", damage: 25, fireRate: 4, range: 280, ammo: 18, reloadTime: 55, cost: 550, unlocked: false, rarity: "common" },
+    energyRifle: { name: "Energy Rifle", damage: 45, fireRate: 7, range: 320, ammo: 15, reloadTime: 45, cost: 900, unlocked: false, rarity: "epic" },
+    tacticalRifle: { name: "Tactical Rifle", damage: 40, fireRate: 5, range: 300, ammo: 12, reloadTime: 65, cost: 750, unlocked: false, rarity: "rare" },
+    antiMateriel: { name: "Anti-Materiel", damage: 200, fireRate: 40, range: 800, ammo: 2, reloadTime: 200, cost: 2000, unlocked: false, rarity: "legendary" },
+    gaussRifle: { name: "Gauss Rifle", damage: 90, fireRate: 18, range: 450, ammo: 6, reloadTime: 100, cost: 1200, unlocked: false, rarity: "legendary" },
+    hybridRifle: { name: "Hybrid Rifle", damage: 60, fireRate: 10, range: 380, ammo: 14, reloadTime: 75, cost: 1100, unlocked: false, rarity: "epic" }
+  },
+  
+  // Shotguns and Close-Range (10)
+  shotguns: {
+    pumpShotgun: { name: "Pump Shotgun", damage: 60, fireRate: 15, range: 80, ammo: 8, reloadTime: 80, cost: 400, unlocked: false, rarity: "common" },
+    sawedOff: { name: "Sawed-Off", damage: 80, fireRate: 20, range: 60, ammo: 2, reloadTime: 60, cost: 300, unlocked: false, rarity: "common" },
+    flakCannon: { name: "Flak Cannon", damage: 100, fireRate: 25, range: 100, ammo: 4, reloadTime: 100, cost: 800, unlocked: false, rarity: "epic" },
+    combatShotgun: { name: "Combat Shotgun", damage: 45, fireRate: 8, range: 90, ammo: 12, reloadTime: 70, cost: 600, unlocked: false, rarity: "rare" },
+    doubleBarrel: { name: "Double Barrel", damage: 70, fireRate: 18, range: 85, ammo: 2, reloadTime: 50, cost: 350, unlocked: false, rarity: "common" },
+    autoShotgun: { name: "Auto Shotgun", damage: 35, fireRate: 5, range: 75, ammo: 16, reloadTime: 90, cost: 700, unlocked: false, rarity: "rare" },
+    plasmaShotgun: { name: "Plasma Shotgun", damage: 55, fireRate: 10, range: 95, ammo: 10, reloadTime: 60, cost: 900, unlocked: false, rarity: "epic" },
+    explosiveShotgun: { name: "Explosive Shotgun", damage: 90, fireRate: 22, range: 70, ammo: 6, reloadTime: 85, cost: 1000, unlocked: false, rarity: "epic" },
+    tacticalShotgun: { name: "Tactical Shotgun", damage: 50, fireRate: 12, range: 100, ammo: 14, reloadTime: 75, cost: 650, unlocked: false, rarity: "rare" },
+    teslaShotgun: { name: "Tesla Shotgun", damage: 65, fireRate: 14, range: 85, ammo: 8, reloadTime: 70, cost: 1100, unlocked: false, rarity: "legendary" }
+  },
+  
+  // Heavy and Exotic (10)
+  heavy: {
+    minigun: { name: "Minigun", damage: 25, fireRate: 1, range: 300, ammo: 200, reloadTime: 120, cost: 1000, unlocked: false, rarity: "epic" },
+    rocketLauncher: { name: "Rocket Launcher", damage: 200, fireRate: 30, range: 400, ammo: 3, reloadTime: 100, cost: 1200, unlocked: false, rarity: "epic" },
+    laserRifle: { name: "Laser Rifle", damage: 40, fireRate: 4, range: 350, ammo: 50, reloadTime: 30, cost: 800, unlocked: false, rarity: "epic" },
+    flamethrower: { name: "Flamethrower", damage: 30, fireRate: 2, range: 120, ammo: 100, reloadTime: 80, cost: 700, unlocked: false, rarity: "rare" },
+    grenadeLauncher: { name: "Grenade Launcher", damage: 150, fireRate: 20, range: 300, ammo: 6, reloadTime: 90, cost: 900, unlocked: false, rarity: "epic" },
+    plasmaCannon: { name: "Plasma Cannon", damage: 80, fireRate: 15, range: 250, ammo: 20, reloadTime: 60, cost: 1100, unlocked: false, rarity: "epic" },
+    chainGun: { name: "Chain Gun", damage: 35, fireRate: 2, range: 280, ammo: 150, reloadTime: 100, cost: 1300, unlocked: false, rarity: "legendary" },
+    teslaCannon: { name: "Tesla Cannon", damage: 70, fireRate: 12, range: 200, ammo: 25, reloadTime: 70, cost: 1400, unlocked: false, rarity: "legendary" },
+    mortar: { name: "Mortar", damage: 300, fireRate: 50, range: 500, ammo: 2, reloadTime: 150, cost: 1800, unlocked: false, rarity: "legendary" },
+    gaussCannon: { name: "Gauss Cannon", damage: 120, fireRate: 25, range: 400, ammo: 8, reloadTime: 110, cost: 1600, unlocked: false, rarity: "legendary" }
+  },
+  
+  // Melee and Special (5)
+  melee: {
+    machete: { name: "Machete", damage: 40, fireRate: 5, range: 30, ammo: 999, reloadTime: 0, cost: 100, unlocked: false, rarity: "common" },
+    chainsaw: { name: "Chainsaw", damage: 60, fireRate: 2, range: 40, ammo: 999, reloadTime: 0, cost: 500, unlocked: false, rarity: "rare" },
+    boomerangAxe: { name: "Boomerang Axe", damage: 50, fireRate: 8, range: 80, ammo: 1, reloadTime: 0, cost: 400, unlocked: false, rarity: "rare" },
+    energySword: { name: "Energy Sword", damage: 80, fireRate: 6, range: 35, ammo: 999, reloadTime: 0, cost: 800, unlocked: false, rarity: "epic" },
+    plasmaBlade: { name: "Plasma Blade", damage: 100, fireRate: 8, range: 40, ammo: 999, reloadTime: 0, cost: 1200, unlocked: false, rarity: "legendary" }
+  }
+};
+
+// Current weapon system
+let currentWeapon = 'revolver';
+let currentWeaponCategory = 'pistols';
+let weaponAmmo = 0;
+let weaponReloadTimer = 0;
+
+// Timers
+let spawnTimer = 0;
+const spawnDelay = 60; // frames between spawns (faster spawning)
+
+// Audio references
+const sfxShoot = document.getElementById('sfx_shoot');
+const sfxHit = document.getElementById('sfx_hit');
+const bgm = document.getElementById('bgm');
+
+// UI references
+const ui = document.getElementById('ui');
+const menuPanel = document.getElementById('menuPanel');
+const menuButtons = document.getElementById('menuButtons');
+const upgradeMenu = document.getElementById('upgradeMenu');
+const upgradeList = document.getElementById('upgradeList');
+const scoreDisplay = document.getElementById('scoreDisplay');
+const scoreText = document.getElementById('scoreText');
+
+function buildMenu(){
+  menuButtons.innerHTML = '';
+  const startBtn = document.createElement('button'); startBtn.textContent = 'Start Game';
+  startBtn.onclick = () => { startGame(); };
+  const controlsBtn = document.createElement('button'); controlsBtn.textContent = 'Controls';
+  controlsBtn.onclick = () => { showControls(); };
+  const quitBtn = document.createElement('button'); quitBtn.textContent = 'Reset Data';
+  quitBtn.onclick = () => { resetData(); };
+  menuButtons.appendChild(startBtn);
+  menuButtons.appendChild(controlsBtn);
+  menuButtons.appendChild(quitBtn);
+}
+buildMenu();
+
+function showControls(){
+  state = 'controls';
+  menuPanel.style.display = 'block';
+  document.getElementById('menuContent').innerHTML = `
+    <h3>Controls</h3>
+    <div style="text-align:left">
+      WASD / Arrow Keys: Move<br>
+      Mouse Left: Shoot (Unlimited Ammo)<br>
+      U: Toggle Upgrade Menu<br>
+      I: Toggle Infinite HP<br>
+      ESC: Back to Menu
+    </div>
+    <div style="margin-top:12px;text-align:left;font-size:12px;color:#aaa">
+      <strong>Scoring:</strong><br>
+      • Deer Kill: +50 points<br>
+      • Sniper Kill: +100 points<br>
+      • Survival Time: +1 point/second<br>
+      • Wave Bonus: +25 points/wave
+    </div>
+    <div style="margin-top:8px">
+      <button id="backBtn">Back</button>
+    </div>
+  `;
+  document.getElementById('backBtn').onclick = () => { menuPanel.style.display='none'; buildMenu(); state='menu'; };
+}
+
+function buildUpgradeMenu(){
+  upgradeList.innerHTML = '';
+  
+  // Create tabs for different upgrade categories
+  const tabContainer = document.createElement('div');
+  tabContainer.style.cssText = 'display:flex;margin-bottom:10px;gap:5px;';
+  
+  const categories = ['health', 'offense', 'mobility', 'weapons', 'turrets', 'specialty'];
+  const categoryNames = ['Health & Defense', 'Offense', 'Mobility', 'Weapons', 'Turrets', 'Specialty'];
+  
+  categories.forEach((cat, index) => {
+    const tab = document.createElement('button');
+    tab.textContent = categoryNames[index];
+    tab.style.cssText = 'padding:5px 10px;font-size:12px;background:#444;color:#fff;border:1px solid #666;cursor:pointer;';
+    tab.onclick = () => showUpgradeCategory(cat);
+    tabContainer.appendChild(tab);
+  });
+  
+  upgradeList.appendChild(tabContainer);
+  
+  // Show health upgrades by default
+  showUpgradeCategory('health');
+}
+
+function showUpgradeCategory(category) {
+  console.log('Showing upgrade category:', category);
+  
+  // Clear previous content except tabs
+  const items = upgradeList.querySelectorAll('.upgrade-item');
+  items.forEach(item => item.remove());
+  
+  const categoryUpgrades = upgrades[category];
+  if (!categoryUpgrades) {
+    console.log('No upgrades found for category:', category);
+    return;
+  }
+  
+  console.log('Found upgrades:', Object.keys(categoryUpgrades));
+  
+  // Add weapons section if health or weapons category
+  if (category === 'health' || category === 'weapons') {
+    addWeaponSection();
+  }
+  
+  // Add upgrades for this category
+  for (const [upgradeKey, upgrade] of Object.entries(categoryUpgrades)) {
+    const currentLevel = playerUpgrades[category]?.[upgradeKey] || 0;
+    const isMaxed = currentLevel >= upgrade.maxLevel;
+    const cost = isMaxed ? 'MAX' : upgrade.cost * (currentLevel + 1);
+    const canAfford = isMaxed || globals.currency >= cost;
+    
+    console.log(`Creating upgrade: ${upgradeKey}, Level: ${currentLevel}, Cost: ${cost}, Can afford: ${canAfford}`);
+    
+    const upgradeDiv = document.createElement('div');
+    upgradeDiv.className = 'upgrade-item';
+    
+    const rarityColor = {
+      'common': '#fff',
+      'rare': '#6cf',
+      'epic': '#c6f',
+      'legendary': '#fc6'
+    }[upgrade.rarity] || '#fff';
+    
+    upgradeDiv.innerHTML = `
+      <div style="color:${rarityColor};font-weight:bold">${upgrade.name}</div>
+      <div style="font-size:11px;color:#ccc">Level ${currentLevel}/${upgrade.maxLevel}</div>
+      <div style="font-size:11px">Effect: +${upgrade.perLevel} per level</div>
+      <div style="font-size:11px">Cost: $${cost}</div>
+      <button onclick="purchaseUpgrade('${category}', '${upgradeKey}')" 
+              ${!canAfford ? 'disabled' : ''} 
+              style="font-size:11px;padding:3px 8px;margin-top:3px;">
+        ${isMaxed ? 'MAXED' : 'Upgrade'}
+      </button>
+    `;
+    upgradeList.appendChild(upgradeDiv);
+  }
+  
+  console.log('Upgrade category displayed');
+}
+
+function addWeaponSection() {
+  console.log('addWeaponSection called, current weapon:', currentWeapon, currentWeaponCategory);
+  const weaponDiv = document.createElement('div');
+  weaponDiv.className = 'upgrade-item';
+  weaponDiv.style.cssText = 'border:2px solid #fc6;background:rgba(255,204,102,0.1);';
+  
+  const weapon = weapons[currentWeaponCategory][currentWeapon];
+  console.log('Current weapon object:', weapon);
+  
+  const weaponDamageBoost = (playerUpgrades.weapons?.weaponDamage || 0) * upgrades.weapons.weaponDamage.perLevel;
+  const weaponFireRateBoost = (playerUpgrades.weapons?.weaponFireRate || 0) * upgrades.weapons.weaponFireRate.perLevel;
+  const weaponRangeBoost = (playerUpgrades.weapons?.weaponRange || 0) * upgrades.weapons.weaponRange.perLevel;
+  const weaponAmmoBoost = (playerUpgrades.weapons?.weaponAmmo || 0) * upgrades.weapons.weaponAmmo.perLevel;
+  const weaponReloadBoost = (playerUpgrades.weapons?.weaponReload || 0) * upgrades.weapons.weaponReload.perLevel;
+  
+  weaponDiv.innerHTML = `
+    <div style="color:#fc6;font-weight:bold">Current Weapon: ${weapon.name}</div>
+    <div style="font-size:11px">Damage: ${weapon.damage}${weaponDamageBoost > 0 ? ` (+${weaponDamageBoost})` : ''}</div>
+    <div style="font-size:11px">Fire Rate: ${weapon.fireRate}${weaponFireRateBoost > 0 ? ` (+${weaponFireRateBoost})` : ''}</div>
+    <div style="font-size:11px">Range: ${weapon.range}${weaponRangeBoost > 0 ? ` (+${weaponRangeBoost})` : ''}</div>
+    <div style="font-size:11px">Ammo: ${weaponAmmo}/${weapon.ammo + weaponAmmoBoost}</div>
+    <div style="font-size:11px">Reload: ${weapon.reloadTime}${weaponReloadBoost > 0 ? ` (-${weaponReloadBoost})` : ''}</div>
+    <button onclick="showWeaponMenu()" style="font-size:11px;padding:3px 8px;margin-top:3px;">
+      Change Weapon
+    </button>
+  `;
+  upgradeList.appendChild(weaponDiv);
+}
+
+function showWeaponMenu() {
+  // Create weapon selection modal
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:1000;display:flex;align-items:center;justify-content:center;';
+  
+  const modalContent = document.createElement('div');
+  modalContent.style.cssText = 'background:#222;padding:20px;border-radius:10px;max-width:80%;max-height:80%;overflow-y:auto;';
+  
+  let content = '<h3 style="color:#fc6;margin-top:0">Weapon Selection</h3>';
+  
+  for (const [category, categoryWeapons] of Object.entries(weapons)) {
+    content += `<h4 style="color:#6cf;margin:15px 0 5px 0">${category.toUpperCase()}</h4>`;
+    
+    for (const [weaponKey, weapon] of Object.entries(categoryWeapons)) {
+      const isUnlocked = weapon.unlocked;
+      const canAfford = globals.currency >= weapon.cost;
+      const isCurrent = currentWeapon === weaponKey && currentWeaponCategory === category;
+      
+      console.log(`Weapon ${weapon.name}: unlocked=${isUnlocked}, canAfford=${canAfford}, isCurrent=${isCurrent}, cost=${weapon.cost}, currency=${globals.currency}`);
+      
+      const rarityColor = {
+        'common': '#fff',
+        'rare': '#6cf',
+        'epic': '#c6f',
+        'legendary': '#fc6'
+      }[weapon.rarity] || '#fff';
+      
+      const weaponDamageBoost = (playerUpgrades.weapons?.weaponDamage || 0) * upgrades.weapons.weaponDamage.perLevel;
+      const weaponFireRateBoost = (playerUpgrades.weapons?.weaponFireRate || 0) * upgrades.weapons.weaponFireRate.perLevel;
+      const weaponRangeBoost = (playerUpgrades.weapons?.weaponRange || 0) * upgrades.weapons.weaponRange.perLevel;
+      const weaponAmmoBoost = (playerUpgrades.weapons?.weaponAmmo || 0) * upgrades.weapons.weaponAmmo.perLevel;
+      const weaponReloadBoost = (playerUpgrades.weapons?.weaponReload || 0) * upgrades.weapons.weaponReload.perLevel;
+      
+      content += `
+        <div style="margin:5px 0;padding:8px;background:${isCurrent ? '#333' : '#111'};border:1px solid #444;border-radius:5px;">
+          <div style="color:${rarityColor};font-weight:bold">${weapon.name}</div>
+          <div style="font-size:11px;color:#ccc">
+            Damage: ${weapon.damage}${weaponDamageBoost > 0 ? ` (+${weaponDamageBoost})` : ''} | Fire Rate: ${weapon.fireRate}${weaponFireRateBoost > 0 ? ` (+${weaponFireRateBoost})` : ''} | Range: ${weapon.range}${weaponRangeBoost > 0 ? ` (+${weaponRangeBoost})` : ''}
+          </div>
+          <div style="font-size:11px;color:#ccc">
+            Ammo: ${weapon.ammo}${weaponAmmoBoost > 0 ? ` (+${weaponAmmoBoost})` : ''} | Reload: ${weapon.reloadTime}${weaponReloadBoost > 0 ? ` (-${weaponReloadBoost})` : ''} | Cost: $${weapon.cost}
+          </div>
+          <button onclick="selectWeapon('${category}', '${weaponKey}')" 
+                  ${!isUnlocked && !canAfford ? 'disabled' : ''}
+                  style="font-size:11px;padding:3px 8px;margin-top:3px;">
+            ${isCurrent ? 'EQUIPPED' : (isUnlocked ? 'Select' : `Unlock ($${weapon.cost})`)}
+          </button>
+        </div>
+      `;
+    }
+  }
+  
+  content += '<button onclick="this.parentElement.parentElement.remove()" style="margin-top:15px;padding:8px 16px;">Close</button>';
+  
+  modalContent.innerHTML = content;
+  modal.appendChild(modalContent);
+  document.body.appendChild(modal);
+}
+
+function selectWeapon(category, weaponKey) {
+  console.log('selectWeapon called:', category, weaponKey);
+  const weapon = weapons[category][weaponKey];
+  console.log('Weapon found:', weapon);
+  
+  if (!weapon.unlocked && globals.currency >= weapon.cost) {
+    console.log('Unlocking weapon, cost:', weapon.cost);
+    // Unlock weapon
+    globals.currency -= weapon.cost;
+    weapon.unlocked = true;
+    console.log('Weapon unlocked, remaining currency:', globals.currency);
+  }
+  
+  if (weapon.unlocked) {
+    console.log('Equipping weapon:', weapon.name);
+    currentWeapon = weaponKey;
+    currentWeaponCategory = category;
+    const weaponAmmoBoost = (playerUpgrades.weapons?.weaponAmmo || 0) * upgrades.weapons.weaponAmmo.perLevel;
+    weaponAmmo = weapon.ammo + weaponAmmoBoost;
+    weaponReloadTimer = 0;
+    
+    // Update player shoot delay based on weapon
+    player.shootDelay = weapon.fireRate;
+    
+    console.log('Weapon equipped:', currentWeapon, currentWeaponCategory);
+    console.log('Weapon stats - Damage:', weapon.damage, 'Fire Rate:', weapon.fireRate, 'Ammo:', weaponAmmo);
+    
+    // Apply weapon upgrade effects
+    applyUpgradeEffects();
+    
+    // Close modal
+    document.querySelector('div[style*="position:fixed"]')?.remove();
+    buildUpgradeMenu(); // Refresh upgrade menu
+  } else {
+    console.log('Weapon not unlocked and cannot afford');
+  }
+}
+
+function purchaseUpgrade(category, upgradeKey) {
+  console.log('Attempting to purchase:', category, upgradeKey);
+  console.log('Current currency:', globals.currency);
+  
+  const upgrade = upgrades[category][upgradeKey];
+  if (!upgrade) {
+    console.error('Upgrade not found:', category, upgradeKey);
+    return;
+  }
+  
+  const currentLevel = playerUpgrades[category]?.[upgradeKey] || 0;
+  if (currentLevel >= upgrade.maxLevel) {
+    console.log('Upgrade already maxed');
+    return;
+  }
+  
+  const cost = upgrade.cost * (currentLevel + 1);
+  console.log('Cost:', cost, 'Can afford:', globals.currency >= cost);
+  
+  if (globals.currency < cost) {
+    console.log('Not enough currency');
+    return;
+  }
+  
+  // Purchase upgrade
+  globals.currency -= cost;
+  if (!playerUpgrades[category]) playerUpgrades[category] = {};
+  playerUpgrades[category][upgradeKey] = currentLevel + 1;
+  
+  console.log('Upgrade purchased! New level:', playerUpgrades[category][upgradeKey]);
+  console.log('Remaining currency:', globals.currency);
+  
+  // Apply immediate effects
+  applyUpgradeEffects();
+  
+  // Refresh menu
+  buildUpgradeMenu();
+}
+
+function applyUpgradeEffects() {
+  // Recalculate player stats
+  const baseHealth = 100;
+  const healthBonus = (playerUpgrades.health?.maxHealth || 0) * upgrades.health.maxHealth.perLevel;
+  const shieldBonus = (playerUpgrades.health?.extraShield || 0) * upgrades.health.extraShield.perLevel;
+  const damageReduction = (playerUpgrades.health?.damageReduction || 0) * upgrades.health.damageReduction.perLevel;
+  
+  // Update player stats
+  player.maxhp = baseHealth + healthBonus;
+  player.hp = Math.min(player.hp, player.maxhp); // Don't reduce HP if upgrading
+  player.maxShield = shieldBonus;
+  player.shield = Math.min(player.shield, player.maxShield);
+  player.defense = damageReduction;
+  player.speed = 4.5 + ((playerUpgrades.mobility?.sprintBoost || 0) * upgrades.mobility.sprintBoost.perLevel / 100);
+  player.healthRegen = (playerUpgrades.health?.healthRegen || 0) * upgrades.health.healthRegen.perLevel;
+  player.critChance = (playerUpgrades.offense?.critChance || 0) * upgrades.offense.critChance.perLevel;
+  player.fireRateBoost = (playerUpgrades.offense?.fireRateBoost || 0) * upgrades.offense.fireRateBoost.perLevel;
+  player.damageBoost = (playerUpgrades.offense?.damageBoost || 0) * upgrades.offense.damageBoost.perLevel;
+  
+  // Apply weapon upgrade effects to current weapon
+  if (currentWeapon && currentWeaponCategory) {
+    const weaponAmmoBoost = (playerUpgrades.weapons?.weaponAmmo || 0) * upgrades.weapons.weaponAmmo.perLevel;
+    weaponAmmo = weapons[currentWeaponCategory][currentWeapon].ammo + weaponAmmoBoost;
+  }
+}
+
+// ======= Reset / Start Game =======
+function resetGame(){
+  // Initialize player upgrades if not exists
+  if (Object.keys(playerUpgrades).length === 0) {
+    // Initialize all upgrades to level 0
+    for (const category in upgrades) {
+      playerUpgrades[category] = {};
+      for (const upgrade in upgrades[category]) {
+        playerUpgrades[category][upgrade] = 0;
+      }
+    }
+  }
+  
+  // Calculate player stats from upgrades
+  const baseHealth = 100;
+  const healthBonus = (playerUpgrades.health?.maxHealth || 0) * upgrades.health.maxHealth.perLevel;
+  const shieldBonus = (playerUpgrades.health?.extraShield || 0) * upgrades.health.extraShield.perLevel;
+  const damageReduction = (playerUpgrades.health?.damageReduction || 0) * upgrades.health.damageReduction.perLevel;
+  
+  // Player
+  player = {
+    x: W/2, y: H/2, r: 16,
+    speed: 4.5 + ((playerUpgrades.mobility?.sprintBoost || 0) * upgrades.mobility.sprintBoost.perLevel / 100),
+    hp: baseHealth + healthBonus,
+    maxhp: baseHealth + healthBonus,
+    shield: shieldBonus,
+    maxShield: shieldBonus,
+    shootCooldown: 0,
+    shootDelay: 12, // Will be calculated from weapon
+    defense: damageReduction,
+    healthRegen: (playerUpgrades.health?.healthRegen || 0) * upgrades.health.healthRegen.perLevel,
+    critChance: (playerUpgrades.offense?.critChance || 0) * upgrades.offense.critChance.perLevel,
+    fireRateBoost: (playerUpgrades.offense?.fireRateBoost || 0) * upgrades.offense.fireRateBoost.perLevel,
+    damageBoost: (playerUpgrades.offense?.damageBoost || 0) * upgrades.offense.damageBoost.perLevel
+  };
+  
+  // Initialize weapon (keep current selection)
+  const weaponAmmoBoost = (playerUpgrades.weapons?.weaponAmmo || 0) * upgrades.weapons.weaponAmmo.perLevel;
+  weaponAmmo = weapons[currentWeaponCategory][currentWeapon].ammo + weaponAmmoBoost;
+  weaponReloadTimer = 0;
+  
+  // Apply weapon upgrade effects
+  applyUpgradeEffects();
+  
+  bullets = []; enemies = []; enemyBullets = [];
+  spawnTimer = 0;
+  globals.wave = 0;
+  globals.score = 0;
+  globals.survivalTime = 0;
+  globals.killCount = 0;
+  // Keep currency and levels between games for progression
+  // stop bgm, will play when started by user action
+  try { bgm.pause(); bgm.currentTime = 0; } catch(e){}
+}
+
+function startGame(){
+  resetGame();
+  state = 'playing';
+  menuPanel.style.display = 'none';
+  upgradeMenu.style.display = 'none';
+  try { bgm.play(); } catch(e) {}
+}
+
+// Reset saved data (complete reset)
+function resetData(){
+  globals.currency = 0;
+  globals.infiniteHP = false;
+  
+  // Reset all upgrades
+  playerUpgrades = {};
+  for (const category in upgrades) {
+    playerUpgrades[category] = {};
+    for (const upgrade in upgrades[category]) {
+      playerUpgrades[category][upgrade] = 0;
+    }
+  }
+  
+  // Reset all weapons to locked except revolver
+  for (const category in weapons) {
+    for (const weapon in weapons[category]) {
+      weapons[category][weapon].unlocked = (category === 'pistols' && weapon === 'revolver');
+    }
+  }
+  
+  // Set default weapon to revolver
+  currentWeapon = 'revolver';
+  currentWeaponCategory = 'pistols';
+  
+  resetGame();
+  alert('All progress reset!');
+}
+
+// ======= Input =======
+window.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  mouse.x = (e.clientX - rect.left) * (canvas.width / rect.width);
+  mouse.y = (e.clientY - rect.top) * (canvas.height / rect.height);
+});
+window.addEventListener('mousedown', e => { if (e.button === 0) mouse.down = true; });
+window.addEventListener('mouseup', e => { if (e.button === 0) mouse.down = false; });
+window.addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === 'Escape') { // pause/menu
+    if (state === 'playing') { 
+      state = 'menu'; 
+      menuPanel.style.display = 'block'; 
+      upgradeMenu.style.display = 'none';
+      buildMenu(); 
+    }
+    else if (state === 'menu') { 
+      menuPanel.style.display='none'; 
+      state='playing'; 
+    }
+    else if (state === 'controls'){ 
+      menuPanel.style.display='none'; 
+      buildMenu(); 
+      state='menu'; 
+    }
+  }
+  if (state === 'playing'){
+    if (e.key.toLowerCase() === 'u'){ 
+      upgradeMenu.style.display = upgradeMenu.style.display === 'none' ? 'block' : 'none';
+      if (upgradeMenu.style.display === 'block') buildUpgradeMenu();
+    }
+    if (e.key.toLowerCase() === 'i'){ 
+      globals.infiniteHP = !globals.infiniteHP; 
+    }
+  }
+});
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+// ======= Entities Creation =======
+function spawnEnemy(type){
+  // type: 'sniper' or 'deer'
+  if (type === 'sniper'){
+    enemies.push({
+      kind:'sniper',
+      x: rand(40, W-40),
+      y: rand(40, H-40),
+      r: 14,
+      hp: 25 + globals.wave * 2, // Scale with wave
+      maxhp: 25 + globals.wave * 2,
+      damage: 15 + globals.wave,
+      speed: 1.5 + globals.wave * 0.1,
+      shootTimer: rand(30, 60),
+      shootRate: Math.max(30, 90 - globals.wave * 2)
+    });
+  } else {
+    enemies.push({
+      kind:'deer',
+      x: rand(40, W-40),
+      y: rand(40, H-40),
+      r: 12,
+      hp: 12 + globals.wave,
+      maxhp: 12 + globals.wave,
+      damage: 8 + Math.floor(globals.wave / 2),
+      speed: 1.8 + globals.wave * 0.05, // Faster and more aggressive
+      wanderTimer: rand(15, 60), // More active
+      dir: Math.random()*Math.PI*2,
+      aggroRange: 200 + globals.wave * 10 // Larger aggro range
+    });
+  }
+}
+
+// ======= Shooting =======
+function playerShoot(){
+  if (player.shootCooldown > 0) return;
+  if (weaponAmmo <= 0) {
+    // Auto-reload if out of ammo
+    if (weaponReloadTimer <= 0) {
+      reloadWeapon();
+    }
+    return;
+  }
+  
+  const weapon = weapons[currentWeaponCategory][currentWeapon];
+  const weaponDamageBoost = (playerUpgrades.weapons?.weaponDamage || 0) * upgrades.weapons.weaponDamage.perLevel;
+  const weaponFireRateBoost = (playerUpgrades.weapons?.weaponFireRate || 0) * upgrades.weapons.weaponFireRate.perLevel;
+  const fireRate = weapon.fireRate - (player.fireRateBoost || 0) - weaponFireRateBoost;
+  player.shootCooldown = Math.max(1, fireRate);
+  
+  // Use ammo
+  weaponAmmo--;
+  
+  // Calculate damage with upgrades
+  let damage = weapon.damage + (player.damageBoost || 0) + weaponDamageBoost;
+  
+  // Apply critical hit chance
+  const isCrit = Math.random() < (player.critChance / 100);
+  if (isCrit) damage *= 2;
+  
+  // bullet initial position slightly offset
+  const dir = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+  const weaponRangeBoost = (playerUpgrades.weapons?.weaponRange || 0) * upgrades.weapons.weaponRange.perLevel;
+  const bulletRange = weapon.range + weaponRangeBoost;
+  bullets.push({
+    x: player.x + Math.cos(dir)*(player.r+6),
+    y: player.y + Math.sin(dir)*(player.r+6),
+    vx: Math.cos(dir)*15,
+    vy: Math.sin(dir)*15,
+    r: 5,
+    dmg: damage,
+    isCrit: isCrit,
+    weaponType: currentWeaponCategory,
+    range: bulletRange,
+    distanceTraveled: 0
+  });
+  
+  try { sfxShoot.currentTime = 0; sfxShoot.play(); } catch(e){}
+}
+
+function reloadWeapon() {
+  const weapon = weapons[currentWeaponCategory][currentWeapon];
+  const weaponReloadBoost = (playerUpgrades.weapons?.weaponReload || 0) * upgrades.weapons.weaponReload.perLevel;
+  weaponReloadTimer = Math.max(1, weapon.reloadTime - weaponReloadBoost);
+}
+
+function updateWeaponSystem() {
+  // Handle reload timer
+  if (weaponReloadTimer > 0) {
+    weaponReloadTimer--;
+    if (weaponReloadTimer <= 0) {
+      const weapon = weapons[currentWeaponCategory][currentWeapon];
+      const weaponAmmoBoost = (playerUpgrades.weapons?.weaponAmmo || 0) * upgrades.weapons.weaponAmmo.perLevel;
+      weaponAmmo = weapon.ammo + weaponAmmoBoost;
+    }
+  }
+  
+  // Auto-reload when out of ammo
+  if (weaponAmmo <= 0 && weaponReloadTimer <= 0) {
+    reloadWeapon();
+  }
+}
+
+// Enemy shoot bullet
+function enemyShoot(enemy){
+  const dir = Math.atan2(player.y - enemy.y, player.x - enemy.x);
+  enemyBullets.push({
+    x: enemy.x + Math.cos(dir)*(enemy.r+6),
+    y: enemy.y + Math.sin(dir)*(enemy.r+6),
+    vx: Math.cos(dir)*8, // Slightly faster enemy bullets
+    vy: Math.sin(dir)*8,
+    r: 6,
+    dmg: Math.max(8, Math.floor(enemy.damage))
+  });
+}
+
+// ======= Health Regeneration =======
+function updateHealthRegen() {
+  if (player.healthRegen > 0 && player.hp < player.maxhp) {
+    player.hp = Math.min(player.maxhp, player.hp + player.healthRegen * 0.016); // 60 FPS
+  }
+}
+
+// ======= Collision Helpers =======
+function circleHit(a,b){
+  const dx = a.x - b.x; const dy = a.y - b.y;
+  return (dx*dx + dy*dy) <= ((a.r + b.r)*(a.r + b.r));
+}
+
+// ======= Game Update =======
+function update(dt){
+  if (state !== 'playing') return;
+
+  // Update survival time and score
+  globals.survivalTime += dt / 1000; // Convert to seconds
+  globals.score += Math.floor(dt / 1000); // 1 point per second survived
+
+  // Update systems
+  updateWeaponSystem();
+  updateHealthRegen();
+
+  // timers
+  if (player.shootCooldown > 0) player.shootCooldown--;
+
+  // player movement
+  let mvx = 0, mvy = 0;
+  if (keys['arrowleft'] || keys['a']) mvx -= 1;
+  if (keys['arrowright'] || keys['d']) mvx += 1;
+  if (keys['arrowup'] || keys['w']) mvy -= 1;
+  if (keys['arrowdown'] || keys['s']) mvy += 1;
+  const mag = Math.hypot(mvx,mvy) || 1;
+  player.x += (mvx/mag) * player.speed;
+  player.y += (mvy/mag) * player.speed;
+  player.x = clamp(player.x, player.r, W - player.r);
+  player.y = clamp(player.y, player.r, H - player.r);
+
+  // shooting (unlimited ammo)
+  if (mouse.down) playerShoot();
+
+  // spawn system: each spawnDelay frames spawn enemies, wave increments
+  spawnTimer++;
+  if (spawnTimer >= spawnDelay){
+    spawnTimer = 0;
+    globals.wave += 1;
+    globals.score += 25; // Wave bonus
+    
+    // spawn count increases with wave (more challenging)
+    const count = 1 + Math.floor(globals.wave / 3) + Math.floor(Math.random() * 2);
+    for (let i=0;i<count;i++){
+      // More snipers as wave grows, but always some deer
+      const chanceSniper = Math.min(0.7, 0.15 + globals.wave * 0.03);
+      spawnEnemy(Math.random() < chanceSniper ? 'sniper' : 'deer');
+    }
+  }
+
+  // update enemies
+  for (let i=enemies.length-1;i>=0;i--){
+    const e = enemies[i];
+    if (e.kind === 'sniper'){
+      // movement: slowly move toward player
+      const ang = Math.atan2(player.y - e.y, player.x - e.x);
+      e.x += Math.cos(ang) * e.speed;
+      e.y += Math.sin(ang) * e.speed;
+
+      // shooting
+      e.shootTimer--;
+      if (e.shootTimer <= 0){
+        enemyShoot(e);
+        e.shootTimer = e.shootRate;
+      }
+    } else {
+      // deer: more aggressive AI
+      e.wanderTimer--;
+      if (e.wanderTimer <= 0){
+        e.dir = Math.random()*Math.PI*2;
+        e.wanderTimer = rand(15, 60);
+      }
+      
+      // Check if player is in aggro range
+      const d = Math.hypot(player.x - e.x, player.y - e.y);
+      if (d < e.aggroRange){
+        // Chase player aggressively
+        const ang = Math.atan2(player.y - e.y, player.x - e.x);
+        e.x += Math.cos(ang) * (e.speed * 1.5); // Even faster when chasing
+        e.y += Math.sin(ang) * (e.speed * 1.5);
+      } else {
+        // Wander
+        e.x += Math.cos(e.dir) * e.speed;
+        e.y += Math.sin(e.dir) * e.speed;
+      }
+    }
+
+    // keep in bounds
+    e.x = clamp(e.x, e.r, W - e.r);
+    e.y = clamp(e.y, e.r, H - e.r);
+
+    // enemy touches player: apply damage with defense calculation
+    if (circleHit(e, player)){
+      if (!globals.infiniteHP) {
+        const actualDamage = Math.max(1, e.damage - player.defense);
+        player.hp -= actualDamage;
+        // small knockback
+        const ang = Math.atan2(player.y - e.y, player.x - e.x);
+        player.x += Math.cos(ang) * 8;
+        player.y += Math.sin(ang) * 8;
+      }
+    }
+
+    // remove dead enemies and award points
+    if (e.hp <= 0){
+      // Score and currency rewards
+      if (e.kind === 'sniper') {
+        globals.score += 100;
+        globals.currency += 50 + globals.wave * 2;
+      } else {
+        globals.score += 50;
+        globals.currency += 25 + globals.wave;
+      }
+      globals.killCount++;
+      enemies.splice(i,1);
+      continue;
+    }
+  }
+
+  // update bullets (player bullets)
+  for (let i=bullets.length-1;i>=0;i--){
+    const b = bullets[i];
+    b.x += b.vx; b.y += b.vy;
+    b.distanceTraveled += Math.hypot(b.vx, b.vy);
+    
+    // Remove bullet if it exceeds range or goes off screen
+    if (b.distanceTraveled > b.range || b.x < -10 || b.y < -10 || b.x > W+10 || b.y > H+10){ 
+      bullets.splice(i,1); 
+      continue; 
+    }
+
+    // hit enemies
+    let hitIndex = -1;
+    for (let j=0;j<enemies.length;j++){
+      if (circleHit(b, enemies[j])){
+        enemies[j].hp -= b.dmg;
+        try { sfxHit.currentTime = 0; sfxHit.play(); } catch(e) {}
+        hitIndex = j;
+        break;
+      }
+    }
+    if (hitIndex >= 0){ bullets.splice(i,1); continue; }
+  }
+
+  // update enemy bullets
+  for (let i=enemyBullets.length-1;i>=0;i--){
+    const b = enemyBullets[i];
+    b.x += b.vx; b.y += b.vy;
+    if (b.x < -10 || b.y < -10 || b.x > W+10 || b.y > H+10){ enemyBullets.splice(i,1); continue; }
+
+    // hit player with defense calculation
+    if (circleHit(b, player)){
+      if (!globals.infiniteHP) {
+        const actualDamage = Math.max(1, b.dmg - player.defense);
+        player.hp -= actualDamage;
+      }
+      enemyBullets.splice(i,1);
+      continue;
+    }
+  }
+
+  // clamp hp
+  player.hp = Math.max(0, player.hp);
+  if (!globals.infiniteHP && player.hp <= 0){
+    state = 'gameover';
+    menuPanel.style.display = 'block';
+    upgradeMenu.style.display = 'none';
+    document.getElementById('menuContent').innerHTML = `
+      <h2>Game Over</h2>
+      <div style="margin:10px 0">
+        <div><strong>Final Score: ${Math.floor(globals.score)}</strong></div>
+        <div>Wave Reached: ${globals.wave}</div>
+        <div>Enemies Killed: ${globals.killCount}</div>
+        <div>Survival Time: ${Math.floor(globals.survivalTime)}s</div>
+        <div>Money Earned: $${globals.currency}</div>
+      </div>
+      <div style="margin-top:12px">
+        <button id="restart">Play Again</button>
+        <button id="mainMenu">Main Menu</button>
+      </div>
+    `;
+    document.getElementById('restart').onclick = () => { startGame(); };
+    document.getElementById('mainMenu').onclick = () => { 
+      menuPanel.style.display='none'; 
+      buildMenu(); 
+      state='menu'; 
+      menuPanel.style.display = 'block';
+    };
+  }
+
+  // Update score display
+  scoreText.textContent = `Score: ${Math.floor(globals.score)} | Wave: ${globals.wave} | Money: $${globals.currency}`;
+}
+
+// ======= Render =======
+function render(){
+  // Draw background image if loaded, otherwise fallback
+  if (images.background.complete && images.background.naturalWidth > 0) {
+    ctx.drawImage(images.background, 0, 0, W, H);
+  } else {
+    // Fallback background
+    ctx.fillStyle = '#3b6b2f';
+    ctx.fillRect(0,0,W,H);
+    
+    // Simple ground grid for visual
+    ctx.strokeStyle = 'rgba(0,0,0,0.08)';
+    ctx.lineWidth = 1;
+    for (let gx=0; gx<W; gx+=64){
+      ctx.beginPath(); ctx.moveTo(gx,0); ctx.lineTo(gx,H); ctx.stroke();
+    }
+    for (let gy=0; gy<H; gy+=64){
+      ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke();
+    }
+  }
+
+  // draw enemies
+  for (const e of enemies){
+    if (e.kind === 'sniper'){
+      // Draw sniper image if loaded, otherwise fallback
+      if (images.sniper.complete && images.sniper.naturalWidth > 0) {
+        ctx.drawImage(images.sniper, e.x - e.r, e.y - e.r, e.r*2, e.r*2);
+      } else {
+        // Fallback sniper sprite
+        ctx.fillStyle = '#b23';
+        ctx.fillRect(e.x - e.r, e.y - e.r, e.r*2, e.r*2);
+        ctx.fillStyle = '#222';
+        ctx.fillRect(e.x - e.r/2, e.y - e.r - 6, e.r, 4);
+      }
+      
+      // health bar
+      ctx.fillStyle = '#700';
+      ctx.fillRect(e.x - e.r, e.y - e.r - 12, e.r*2, 4);
+      ctx.fillStyle = '#0f0';
+      ctx.fillRect(e.x - e.r, e.y - e.r - 12, (e.hp / e.maxhp) * e.r*2, 4);
+    } else {
+      // Draw deer image if loaded, otherwise fallback
+      if (images.deer.complete && images.deer.naturalWidth > 0) {
+        ctx.drawImage(images.deer, e.x - e.r, e.y - e.r, e.r*2, e.r*2);
+      } else {
+        // Fallback deer sprite
+        ctx.fillStyle = '#8b4513';
+        ctx.beginPath(); ctx.ellipse(e.x, e.y, e.r, e.r*0.7, 0, 0, Math.PI*2); ctx.fill();
+      }
+      
+      // health bar
+      ctx.fillStyle = '#700';
+      ctx.fillRect(e.x - e.r, e.y - e.r - 12, e.r*2, 4);
+      ctx.fillStyle = '#0f0';
+      ctx.fillRect(e.x - e.r, e.y - e.r - 12, (e.hp / e.maxhp) * e.r*2, 4);
+    }
+  }
+
+  // draw player
+  ctx.save();
+  // player rotated facing mouse
+  const ang = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+  ctx.translate(player.x, player.y);
+  ctx.rotate(ang);
+  
+  // Draw hunter image if loaded, otherwise fallback
+  if (images.hunter.complete && images.hunter.naturalWidth > 0) {
+    ctx.drawImage(images.hunter, -player.r, -player.r, player.r*2, player.r*2);
+  } else {
+    // Fallback player sprite
+    ctx.fillStyle = '#2a9';
+    ctx.beginPath(); ctx.arc(0,0,player.r,0,Math.PI*2); ctx.fill();
+    // gun
+    ctx.fillStyle = '#222';
+    ctx.fillRect(4, -4, 18, 8);
+  }
+  ctx.restore();
+
+  // draw bullets
+  for (const b of bullets){
+    // Draw bullet image if loaded, otherwise fallback
+    if (images.bullet.complete && images.bullet.naturalWidth > 0) {
+      ctx.drawImage(images.bullet, b.x - b.r, b.y - b.r, b.r*2, b.r*2);
+    } else {
+      // Different colors for different weapon types and critical hits
+      if (b.isCrit) {
+        ctx.fillStyle = '#f00'; // Red for critical hits
+        ctx.beginPath(); ctx.arc(b.x, b.y, b.r*1.5, 0, Math.PI*2); ctx.fill();
+      } else if (b.weaponType === 'heavy') {
+        ctx.fillStyle = '#f80'; // Orange for heavy weapons
+        ctx.beginPath(); ctx.arc(b.x, b.y, b.r*1.2, 0, Math.PI*2); ctx.fill();
+      } else if (b.weaponType === 'melee') {
+        ctx.fillStyle = '#0f0'; // Green for melee
+        ctx.beginPath(); ctx.arc(b.x, b.y, b.r*0.8, 0, Math.PI*2); ctx.fill();
+      } else {
+        ctx.fillStyle = '#ffa'; // Yellow for normal bullets
+        ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); ctx.fill();
+      }
+    }
+  }
+  
+  for (const b of enemyBullets){
+    ctx.fillStyle = '#f55';
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); ctx.fill();
+  }
+
+  // Player health bar (bottom left)
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(10, H-60, 300, 50);
+  ctx.fillStyle = '#fff';
+  ctx.font = '16px Arial';
+  ctx.fillText(`HP: ${globals.infiniteHP ? 'Infinite' : Math.floor(player.hp) + ' / ' + Math.floor(player.maxhp)}`, 20, H-35);
+  
+  // Health bar visual
+  if (!globals.infiniteHP) {
+    ctx.fillStyle = '#700';
+    ctx.fillRect(20, H-25, 200, 8);
+    ctx.fillStyle = '#0f0';
+    ctx.fillRect(20, H-25, (player.hp / player.maxhp) * 200, 8);
+  }
+
+  // Game stats (top left)
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(10,10,320,140);
+  ctx.fillStyle = '#fff';
+  ctx.font = '14px Arial';
+  ctx.fillText(`Wave: ${globals.wave}`, 20, 32);
+  ctx.fillText(`Enemies: ${enemies.length}`, 20, 52);
+  ctx.fillText(`Kills: ${globals.killCount}`, 20, 72);
+  ctx.fillText(`Weapon: ${weapons[currentWeaponCategory][currentWeapon].name}`, 20, 92);
+  ctx.fillText(`Ammo: ${weaponAmmo}/${weapons[currentWeaponCategory][currentWeapon].ammo}`, 20, 112);
+  if (weaponReloadTimer > 0) {
+    ctx.fillText(`Reloading... ${Math.ceil(weaponReloadTimer/60)}s`, 20, 132);
+  }
+  
+  ctx.fillText(`Time: ${Math.floor(globals.survivalTime)}s`, 160, 32);
+  ctx.fillText(`Money: $${globals.currency}`, 160, 52);
+  ctx.fillText(`Score: ${Math.floor(globals.score)}`, 160, 72);
+  ctx.fillText(`Press U for upgrades`, 160, 92);
+  ctx.fillText(`Press I for infinite HP`, 160, 112);
+}
+
+// ======= Main Loop =======
+function frame(ts){
+  if (!last) last = ts;
+  const dt = ts - last;
+  last = ts;
+  now++;
+  update(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ======= Start in menu =======
+menuPanel.style.display = 'block';
+document.getElementById('menuContent').innerHTML = `
+  <h2 style="color:#ff6;text-shadow:2px 2px 4px #000">Deer Hunter Survival</h2>
+  <div style="margin:15px 0;color:#ddd;text-align:center;font-size:14px">
+    <div>🎯 Ultimate survival challenge!</div>
+    <div>🦌 Hunt deer and eliminate snipers</div>
+    <div>⚡ Unlimited ammo with upgrade system</div>
+    <div>🏆 Endless waves with increasing difficulty</div>
+  </div>
+  <div style="margin-top:15px">
+    <button id="start" style="background:#4a4;color:#fff;font-weight:bold">Start Game</button>
+    <button id="controls" style="background:#44a;color:#fff">Controls & Scoring</button>
+    <button id="reset" style="background:#a44;color:#fff">Reset Progress</button>
+  </div>
+`;
+document.getElementById('start').onclick = () => { startGame(); };
+document.getElementById('controls').onclick = () => { showControls(); };
+document.getElementById('reset').onclick = () => { resetData(); };
+menuPanel.style.left = 'calc(50% - 200px)';
+
+// Initialize game state
+resetGame();
+
+// Ensure images are loaded before starting
+let imagesLoaded = 0;
+const totalImages = Object.keys(images).length;
+
+function checkImagesLoaded() {
+  imagesLoaded++;
+  if (imagesLoaded >= totalImages) {
+    console.log('All images loaded successfully!');
+  }
+}
+
+// Add load event listeners to all images
+Object.values(images).forEach(img => {
+  if (img.complete) {
+    checkImagesLoaded();
+  } else {
+    img.addEventListener('load', checkImagesLoaded);
+    img.addEventListener('error', () => {
+      console.warn('Failed to load image:', img.src);
+      checkImagesLoaded();
+    });
+  }
+});
+</script>
+</body>
+</html>
+
+<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3967424623950870"
+     crossorigin="anonymous"></script>
+<ins class="adsbygoogle"
+     style="display:block"
+     data-ad-format="fluid"
+     data-ad-layout-key="-6r+ed+2h-1n-4u"
+     data-ad-client="ca-pub-3967424623950870"
+     data-ad-slot="1287214558"></ins>
+<script>
+     (adsbygoogle = window.adsbygoogle || []).push({});
+</script>
+
+<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3967424623950870"
+     crossorigin="anonymous"></script>
+<!-- hunter game display -->
+<ins class="adsbygoogle"
+     style="display:block"
+     data-ad-client="ca-pub-3967424623950870"
+     data-ad-slot="1407468207"
+     data-ad-format="auto"
+     data-full-width-responsive="true"></ins>
+<script>
+     (adsbygoogle = window.adsbygoogle || []).push({});
+</script>
